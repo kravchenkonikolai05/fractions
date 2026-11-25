@@ -18,11 +18,6 @@
         -webkit-tap-highlight-color: transparent; font-family: var(--serif); }
   .hit { cursor: pointer; }
   .drag { cursor: ew-resize; }
-  .den { position: absolute; transform: translate(-50%, -50%); box-sizing: border-box;
-         border: none; background: transparent; text-align: center; font-weight: 400;
-         font-family: var(--serif); padding: 0; border-radius: 6px; outline: none; caret-color: currentColor; }
-  .den:hover { background: #1b1b20; }
-  .den:focus { background: #1b1b20; box-shadow: 0 0 0 1.5px currentColor; }
 </style>
 </head>
 <body>
@@ -48,7 +43,6 @@ let drag = null;                    // { i, px } while a dot is dragged
 let tap = null;                     // pending button / piece tap
 let running = false, last = 0;     // animation loop
 let L = {};                         // layout in CSS pixels (1 SVG unit = 1 px)
-const inputs = new Map();           // fraction object -> <input> for its denominator
 
 // ---------- layout ----------
 function layout() {
@@ -115,36 +109,7 @@ function fit() {
   return clamp(Math.ceil(maxV + 1e-9), 1, MAX_M);
 }
 
-// ---------- denominator inputs (HTML on top of the SVG) ----------
-function syncInputs() {
-  for (const [f, inp] of inputs) if (!fr.includes(f)) { inp.remove(); inputs.delete(f); }
-  fr.forEach((f, i) => {
-    let inp = inputs.get(f);
-    if (!inp) {
-      inp = document.createElement('input');
-      Object.assign(inp, { type: 'text', inputMode: 'numeric', pattern: '[0-9]*', maxLength: 3, className: 'den', autocomplete: 'off' });
-      inp.setAttribute('aria-label', 'denominator');
-      inp.name = 'den' + f.c;
-      inp.addEventListener('input', () => {
-        const v = parseInt(inp.value, 10);
-        if (v >= 1 && v <= MAX_D) setDen(f, v);
-      });
-      inp.addEventListener('focus', () => inp.select());
-      inp.addEventListener('blur', () => { inp.value = f.d; });
-      inp.addEventListener('keydown', e => {
-        if (e.key === 'Enter') inp.blur();
-        if (e.key === 'ArrowUp') { e.preventDefault(); setDen(f, f.d + 1); inp.value = f.d; }
-        if (e.key === 'ArrowDown') { e.preventDefault(); setDen(f, f.d - 1); inp.value = f.d; }
-      });
-      wrap.appendChild(inp);
-      inputs.set(f, inp);
-    }
-    const cy = TOP + i * ROW + ROW / 2;
-    Object.assign(inp.style, { left: L.sx + 'px', top: (cy + DY) + 'px', width: (L.font * 2.1) + 'px',
-      height: (L.font * 1.35) + 'px', fontSize: L.font + 'px', color: COLORS[f.c] });
-    if (document.activeElement !== inp) inp.value = f.d;
-  });
-}
+// ---------- denominator ----------
 function setDen(f, d) {
   f.d = clamp(d, 1, MAX_D);
   f.n = Math.min(f.n, MAX_M * f.d);
@@ -205,9 +170,10 @@ function render() {
     el('line', { x1: X(sv), y1: by + BAR_H, x2: X(sv), y2: LY, stroke: col, 'stroke-width': 1.5,
       'stroke-dasharray': '4 6', opacity: 0.55, 'pointer-events': 'none' });
 
-    // fraction symbol: numerator, bar, (denominator is an HTML input), − / + buttons
+    // fraction symbol: numerator, bar, denominator, − / + buttons
     txt(sx, cy - L.font * 0.28, f.n, L.font, col);
     el('line', { x1: sx - L.font * 0.9, y1: cy, x2: sx + L.font * 0.9, y2: cy, stroke: col, 'stroke-width': 2 });
+    txt(sx, cy + DY + L.font * 0.35, f.d, L.font, col);
     button(L.bm, cy + DY, '-', col, f.d > 1, { 'data-act': 'down', 'data-i': i });
     button(L.bp, cy + DY, '+', col, f.d < MAX_D, { 'data-act': 'up', 'data-i': i });
 
@@ -270,7 +236,6 @@ function render() {
     }
   });
 
-  syncInputs();
 }
 
 // ---------- animation loop: smooth fill, smooth dot, smooth zoom ----------
@@ -329,7 +294,6 @@ function snapDrag() {
 }
 
 svg.addEventListener('pointerdown', e => {
-  if (document.activeElement && document.activeElement.classList.contains('den')) document.activeElement.blur();
   const ds = e.target.dataset || {};
   if (ds.act) { tap = { ds: { ...ds }, x: e.clientX, y: e.clientY }; return; }
   const p = svgPoint(e.clientX, e.clientY);
