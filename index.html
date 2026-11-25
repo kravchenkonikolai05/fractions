@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Fractions</title>
+<style>
+  html, body { margin: 0; background: #fff; touch-action: manipulation; }
+  body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  #wrap { position: relative; max-width: 1200px; margin: 0 auto; }
+  svg { display: block; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+        -webkit-tap-highlight-color: transparent;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .hit { cursor: pointer; }
+  .drag { cursor: ew-resize; }
+  .den { position: absolute; transform: translate(-50%, -50%); box-sizing: border-box;
+         border: none; background: transparent; text-align: center; font-weight: 700;
+         font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         padding: 0; border-radius: 8px; outline: none; caret-color: currentColor; }
+  .den:hover { background: #f1f5f9; }
+  .den:focus { background: #f1f5f9; box-shadow: 0 0 0 2px currentColor; }
+</style>
+</head>
+<body>
+<div id="wrap"><svg id="s"></svg></div>
+<script>
+// ---------- constants ----------
+const COLORS = ['#2563eb', '#ea580c', '#16a34a', '#9333ea', '#db2777'];
+const LINE = '#334155', MUTED = '#94a3b8', NS = 'http://www.w3.org/2000/svg';
+const TOP = 12, MAX_D = 100, MAX_M = 30;
+// Vertical sizes. layout() scales them so the whole drawing fits the screen height.
+let ROW = 88, BAR_H = 44, ADD_H = 52, CROW = 88, CR = 36, DY = 20;
+const wrap = document.getElementById('wrap');
+const svg = document.getElementById('s');
+
+// ---------- state ----------
+let fr = [{ n: 3, d: 4, c: 0 }];   // fractions: numerator, denominator, color index
+let M = 1;                          // visible wholes on the number line (non-integer while animating)
+let LY = 0;                         // y of the number line (set in render)
+let active = 0;                     // fraction drawn on top
+let drag = null;                    // { i, px } while a dot is dragged
+let tap = null;                     // pending button / piece tap
+let anim = null;
+let L = {};                         // layout in CSS pixels (1 SVG unit = 1 px)
+const inputs = new Map();           // fraction object -> <input> for its denominator
+
+// ---------- layout ----------
+function layout() {
+  const W = Math.max(320, wrap.clientWidth);
+  const compact = W < 640;
+  const sx = compact ? 66 : 92;           // center of the fraction symbol
+  const bo = compact ? 42 : 52;           // distance from symbol to − / + buttons
+
+  // Fit the height: fixed part (number line + labels + margins) and a part that grows with v.
+  const cs = getComputedStyle(document.body);
+  const availH = window.innerHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  const n = fr.length;
+  const FIXED = TOP + 36 + 64 + 6;
+  const v = clamp((availH - FIXED) / (176 * n + 52), 0.28, 1.8);
+  ROW = 88 * v; BAR_H = 44 * v; ADD_H = 52 * v; CROW = 88 * v; CR = 36 * v;
+
+  const font = Math.min(ROW / 2.5, clamp((compact ? 24 : 28) * v, 13, compact ? 30 : 38));
+  DY = font * 0.72;                       // denominator center below the fraction bar
+  L = { W, compact, sx, bm: sx - bo, bp: sx + bo, font, v,
+        btnR: clamp((compact ? 15 : 16) * v, 9, 20), hitR: clamp(22 * v, 12, 24),
+        X0: sx + bo + (compact ? 34 : 44), X1: W - (compact ? 50 : 72) };
+  L.LW = L.X1 - L.X0;
+}
+
+// ---------- helpers ----------
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const X = v => L.X0 + v / M * L.LW;
+function el(tag, attrs, parent = svg) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  parent.appendChild(e);
+  return e;
+}
+function txt(x, y, s, size, color) {
+  const t = el('text', { x, y, 'font-size': size, fill: color, 'text-anchor': 'middle', 'font-weight': 700, 'pointer-events': 'none' });
+  t.textContent = s;
+}
+function piePath(cx, cy, r, i, d) {
+  const a0 = (-90 + i * 360 / d) * Math.PI / 180, a1 = (-90 + (i + 1) * 360 / d) * Math.PI / 180;
+  return `M${cx},${cy} L${cx + r * Math.cos(a0)},${cy + r * Math.sin(a0)} A${r},${r} 0 ${360 / d > 180 ? 1 : 0} 1 ${cx + r * Math.cos(a1)},${cy + r * Math.sin(a1)} Z`;
+}
+function svgPoint(cx, cy) {
+  const p = svg.createSVGPoint(); p.x = cx; p.y = cy;
+  return p.matrixTransform(svg.getScreenCTM().inverse());
+}
+// Round − / + button with a large invisible touch area.
+function button(cx, cy, kind, color, enabled, data) {
+  el('circle', { cx, cy, r: L.btnR, fill: '#fff', stroke: enabled ? color : '#e2e8f0', 'stroke-width': 2, 'pointer-events': 'none' });
+  const s = L.btnR * 0.5;
+  let d = `M${cx - s},${cy} L${cx + s},${cy}`;
+  if (kind === '+') d += ` M${cx},${cy - s} L${cx},${cy + s}`;
+  if (kind === 'x') d = `M${cx - s * 0.8},${cy - s * 0.8} L${cx + s * 0.8},${cy + s * 0.8} M${cx + s * 0.8},${cy - s * 0.8} L${cx - s * 0.8},${cy + s * 0.8}`;
+  el('path', { d, stroke: enabled ? color : '#e2e8f0', 'stroke-width': 2.5, 'stroke-linecap': 'round', 'pointer-events': 'none' });
+  if (enabled) el('circle', { cx, cy, r: L.hitR, fill: 'transparent', class: 'hit', ...data });
+}
+// Number of wholes that fits all fractions, with room after an exact whole.
+function fit() {
+  const maxV = Math.max(0, ...fr.map(f => f.n / f.d));
+  return clamp(Math.ceil(maxV + 1e-9), 1, MAX_M);
+}
+
+// ---------- denominator inputs (HTML on top of the SVG) ----------
+function syncInputs() {
+  for (const [f, inp] of inputs) if (!fr.includes(f)) { inp.remove(); inputs.delete(f); }
+  fr.forEach((f, i) => {
+    let inp = inputs.get(f);
+    if (!inp) {
+      inp = document.createElement('input');
+      Object.assign(inp, { type: 'text', inputMode: 'numeric', pattern: '[0-9]*', maxLength: 3, className: 'den', autocomplete: 'off' });
+      inp.setAttribute('aria-label', 'denominator');
+      inp.name = 'den' + f.c;
+      inp.addEventListener('input', () => {
+        const v = parseInt(inp.value, 10);
+        if (v >= 1 && v <= MAX_D) setDen(f, v);
+      });
+      inp.addEventListener('focus', () => inp.select());
+      inp.addEventListener('blur', () => { inp.value = f.d; });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') inp.blur();
+        if (e.key === 'ArrowUp') { e.preventDefault(); setDen(f, f.d + 1); inp.value = f.d; }
+        if (e.key === 'ArrowDown') { e.preventDefault(); setDen(f, f.d - 1); inp.value = f.d; }
+      });
+      wrap.appendChild(inp);
+      inputs.set(f, inp);
+    }
+    const cy = TOP + i * ROW + ROW / 2;
+    Object.assign(inp.style, { left: L.sx + 'px', top: (cy + DY) + 'px', width: (L.font * 2.2) + 'px',
+      height: (L.font * 1.45) + 'px', fontSize: L.font + 'px', color: COLORS[f.c] });
+    if (document.activeElement !== inp) inp.value = f.d;
+  });
+}
+function setDen(f, d) {
+  f.d = clamp(d, 1, MAX_D);
+  f.n = Math.min(f.n, MAX_M * f.d);
+  active = fr.indexOf(f);
+  settle();
+}
+
+// ---------- render ----------
+function render() {
+  layout();
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  const { W, X0, X1, LW, sx } = L;
+  const n = fr.length;
+  const addY = TOP + n * ROW;
+  LY = addY + ADD_H + 36;
+  const cTop = LY + 64;
+  const H = cTop + n * CROW + 2;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', W);
+  svg.setAttribute('height', H);
+
+  const defs = el('defs', {});
+  const cp = el('clipPath', { id: 'clip' }, defs);
+  el('rect', { x: X0 - 3, y: 0, width: LW + 6, height: LY }, cp);
+
+  // --- bars (top) ---
+  fr.forEach((f, i) => {
+    const col = COLORS[f.c], cy = TOP + i * ROW + ROW / 2, by = cy - BAR_H / 2;
+    const v = f.n / f.d, full = Math.max(1, Math.ceil(v - 1e-9));
+    const wholes = Math.max(full, Math.ceil(M - 1e-9));
+    const ww = LW / M, pw = ww / f.d;
+    const g = el('g', { 'clip-path': 'url(#clip)' });
+    if (pw >= 3) {
+      const sw = pw < 8 ? 1 : 2;
+      for (let k = 0; k < wholes * f.d; k++) {
+        const used = Math.floor(k / f.d) < full;
+        el('rect', { x: X0 + k * pw, y: by, width: pw, height: BAR_H, fill: k < f.n ? col : '#fff',
+          stroke: LINE, 'stroke-width': sw, opacity: used ? 1 : 0.25, class: 'hit', 'data-act': 'piece', 'data-i': i, 'data-k': k }, g);
+      }
+    } else {   // pieces too thin to draw one by one
+      for (let w = 0; w < wholes; w++)
+        el('rect', { x: X0 + w * ww, y: by, width: ww, height: BAR_H, fill: '#fff', stroke: LINE, 'stroke-width': 1, opacity: w < full ? 1 : 0.25 }, g);
+      el('rect', { x: X0, y: by, width: v * ww, height: BAR_H, fill: col, stroke: LINE, 'stroke-width': 1 }, g);
+    }
+    for (let w = 0; w <= full; w++) {
+      const x = X0 + w * ww;
+      el('line', { x1: x, y1: by, x2: x, y2: by + BAR_H, stroke: LINE, 'stroke-width': 3, 'pointer-events': 'none' }, g);
+    }
+    // dashed guide from the end of the shaded part down to the number line
+    el('line', { x1: X(v), y1: by + BAR_H, x2: X(v), y2: LY, stroke: col, 'stroke-width': 2,
+      'stroke-dasharray': '5 5', opacity: 0.6, 'pointer-events': 'none' });
+
+    // fraction symbol: numerator, bar, (denominator is an HTML input), − / + buttons
+    txt(sx, cy - L.font * 0.3, f.n, L.font, col);
+    el('line', { x1: sx - L.font, y1: cy, x2: sx + L.font, y2: cy, stroke: col, 'stroke-width': 3 });
+    button(L.bm, cy + DY, '-', col, f.d > 1, { 'data-act': 'down', 'data-i': i });
+    button(L.bp, cy + DY, '+', col, f.d < MAX_D, { 'data-act': 'up', 'data-i': i });
+
+    if (n > 1) button(X1 + (W - X1) / 2, cy, 'x', MUTED, true, { 'data-act': 'rm', 'data-i': i });
+  });
+
+  // add (+)
+  if (n < COLORS.length) button(sx, addY + ADD_H / 2, '+', MUTED, true, { 'data-act': 'add' });
+
+  // --- number line (middle) ---
+  el('line', { x1: X0 - 12, y1: LY, x2: X1 + 20, y2: LY, stroke: LINE, 'stroke-width': 2 });
+  fr.forEach(f => {                      // fraction marks cross the line, in the color of each fraction
+    const sp = LW / M / f.d;
+    if (sp < 5) return;
+    for (let k = 0; k <= M * f.d + 1e-9; k++) {
+      const x = X0 + k * sp;
+      el('line', { x1: x, y1: LY - 10, x2: x, y2: LY + 10, stroke: COLORS[f.c], 'stroke-width': 2, opacity: 0.85 });
+    }
+  });
+  const step = M <= 10 ? 1 : M <= 20 ? 2 : 5;
+  for (let w = 0; w <= Math.floor(M + 1e-9); w++) {   // whole numbers
+    const x = X(w);
+    el('line', { x1: x, y1: LY - 16, x2: x, y2: LY + 16, stroke: LINE, 'stroke-width': 3 });
+    if (w % step === 0) txt(x, LY + 42, w, 20, LINE);
+  }
+  el('rect', { x: X0 - 30, y: LY - 34, width: W - X0 + 30, height: 68, fill: 'transparent', class: 'drag' });
+  const order = fr.map((_, i) => i).filter(i => i !== active).concat(active < n ? [active] : []);
+  order.forEach(i => {
+    const f = fr[i];
+    el('circle', { cx: X(f.n / f.d), cy: LY, r: i === active ? 13 : 11, fill: COLORS[f.c], stroke: '#fff', 'stroke-width': 3, 'pointer-events': 'none' });
+  });
+
+  // --- circles (bottom) ---
+  fr.forEach((f, i) => {
+    const col = COLORS[f.c], v = f.n / f.d, cnt = Math.max(1, Math.ceil(v - 1e-9));
+    const r = clamp((LW / cnt - 10) / 2, 4, CR), cy = cTop + i * CROW + CROW / 2 - 4;
+    const thin = 2 * Math.PI * r / f.d < 4;
+    for (let w = 0; w < cnt; w++) {
+      const cx = X0 + r + w * (2 * r + 10);
+      if (thin) {   // slices too thin: draw the shaded part as one sector
+        const q = clamp(v - w, 0, 1);
+        el('circle', { cx, cy, r, fill: q >= 1 ? col : '#fff', stroke: LINE, 'stroke-width': 1.5 });
+        if (q > 0 && q < 1) {
+          const a = (-90 + q * 360) * Math.PI / 180;
+          el('path', { d: `M${cx},${cy} L${cx},${cy - r} A${r},${r} 0 ${q > 0.5 ? 1 : 0} 1 ${cx + r * Math.cos(a)},${cy + r * Math.sin(a)} Z`, fill: col, stroke: LINE, 'stroke-width': 1 });
+        }
+        continue;
+      }
+      for (let j = 0; j < f.d; j++) {
+        const k = w * f.d + j;
+        const attrs = { fill: k < f.n ? col : '#fff', stroke: LINE, 'stroke-width': r < 15 || f.d > 24 ? 1 : 2,
+          class: 'hit', 'data-act': 'piece', 'data-i': i, 'data-k': k };
+        if (f.d === 1) el('circle', { cx, cy, r, ...attrs });
+        else el('path', { d: piePath(cx, cy, r, j, f.d), ...attrs });
+      }
+    }
+  });
+
+  syncInputs();
+}
+
+// ---------- scale animation ----------
+function settle() {
+  cancelAnimationFrame(anim);
+  const from = M, to = fit(), t0 = performance.now(), dur = 350;
+  const step = now => {
+    const t = Math.min(1, (now - t0) / dur), e = 1 - (1 - t) ** 3;
+    M = from + (to - from) * e;
+    render();
+    if (t < 1) anim = requestAnimationFrame(step);
+  };
+  anim = requestAnimationFrame(step);
+}
+
+// ---------- actions ----------
+function doAction(ds) {
+  const i = +ds.i;
+  if (ds.act === 'add') {
+    const used = new Set(fr.map(f => f.c));
+    const c = COLORS.findIndex((_, k) => !used.has(k));
+    fr.push({ n: 1, d: [3, 2, 6, 8, 5][fr.length - 1] || 4, c });
+    active = fr.length - 1;
+  } else if (ds.act === 'rm') {
+    fr.splice(i, 1); active = Math.min(active, fr.length - 1);
+  } else if (ds.act === 'up' || ds.act === 'down') {
+    setDen(fr[i], fr[i].d + (ds.act === 'up' ? 1 : -1)); return;
+  } else if (ds.act === 'piece') {
+    const f = fr[i], k = +ds.k;
+    f.n = (f.n === k + 1) ? k : k + 1;
+    active = i;
+  }
+  settle();
+}
+
+// ---------- pointer input ----------
+const nearLine = p => Math.abs(p.y - LY) < 34 && p.x > L.X0 - 30;
+
+function moveTo(px) {
+  const f = fr[drag.i];
+  const v = (px - L.X0) / L.LW * M;
+  f.n = clamp(Math.round(v * f.d), 0, Math.floor(M * f.d + 1e-9));
+  render();
+}
+function growLoop() {
+  if (!drag) return;
+  if (drag.px > L.X1 + 6 && M < MAX_M) {   // held past the end: zoom out
+    M = Math.min(MAX_M, M * 1.012);
+    moveTo(drag.px);
+  }
+  requestAnimationFrame(growLoop);
+}
+
+svg.addEventListener('pointerdown', e => {
+  if (document.activeElement && document.activeElement.classList.contains('den')) document.activeElement.blur();
+  const ds = e.target.dataset || {};
+  if (ds.act) { tap = { ds: { ...ds }, x: e.clientX, y: e.clientY }; return; }
+  const p = svgPoint(e.clientX, e.clientY);
+  if (!nearLine(p)) return;
+  let best = active, bd = Infinity;
+  fr.forEach((f, i) => {
+    const dd = Math.abs(X(f.n / f.d) - p.x) - (i === active ? 0.5 : 0);
+    if (dd < bd) { bd = dd; best = i; }
+  });
+  cancelAnimationFrame(anim);
+  drag = { i: best, px: p.x }; active = best;
+  try { svg.setPointerCapture(e.pointerId); } catch (_) {}
+  moveTo(p.x);
+  requestAnimationFrame(growLoop);
+});
+svg.addEventListener('pointermove', e => {
+  if (!drag) return;
+  drag.px = svgPoint(e.clientX, e.clientY).x;
+  moveTo(drag.px);
+});
+svg.addEventListener('pointerup', e => {
+  if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 12) doAction(tap.ds);
+  tap = null;
+  if (drag) { drag = null; settle(); }
+});
+svg.addEventListener('pointercancel', () => {   // e.g. the page started to scroll
+  tap = null;
+  if (drag) { drag = null; settle(); }
+});
+// Touch: block page scroll only when the finger starts on the number line.
+svg.addEventListener('touchstart', e => {
+  const t = e.touches[0];
+  if (e.touches.length === 1 && nearLine(svgPoint(t.clientX, t.clientY))) e.preventDefault();
+}, { passive: false });
+svg.addEventListener('touchmove', e => { if (drag) e.preventDefault(); }, { passive: false });
+
+// ---------- start ----------
+new ResizeObserver(() => { if (wrap.clientWidth !== L.W) render(); }).observe(wrap);
+window.addEventListener('resize', render);
+window.addEventListener('orientationchange', () => setTimeout(render, 100));
+layout();
+M = fit();
+render();
+</script>
+</body>
+</html>
